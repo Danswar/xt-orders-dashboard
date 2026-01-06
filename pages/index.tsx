@@ -182,6 +182,12 @@ const Home: NextPage = () => {
             >
               Order Age Histogram
             </Link>
+            <Link 
+              href="/orderbook"
+              className="bg-cyan-600 hover:bg-cyan-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors"
+            >
+              Order Book
+            </Link>
             <button 
               onClick={() => refetch()} 
               disabled={loading} 
