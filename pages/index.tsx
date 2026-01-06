@@ -64,6 +64,8 @@ const fetchBalances = async (): Promise<BalanceData> => {
 
 const Home: NextPage = () => {
   const queryClient = useQueryClient()
+  const [ordersToKeep, setOrdersToKeep] = useState(100)
+  
   const { data: orders = {}, isLoading: loading, error, refetch } = useQuery<OrdersData>({
     queryKey: ['orders'],
     queryFn: fetchOrders,
@@ -75,7 +77,6 @@ const Home: NextPage = () => {
     queryFn: fetchBalances,
     refetchInterval: 30000, // Refresh every 30 seconds
   })
-
 
   const cancelOrdersMutation = useMutation({
     mutationFn: async ({ symbol, orderIds }: { symbol: string; orderIds: string[] }) => {
@@ -119,12 +120,62 @@ const Home: NextPage = () => {
     }, { buy: { count: 0, liquidity: 0 }, sell: { count: 0, liquidity: 0 } })
   }
 
+  const cutTails = async (pair: Pair) => {
+    const orderList = orders[pair.symbol] || []
+    if (orderList.length === 0) return
+
+    const allOrderIds: string[] = []
+
+    // Process BUY orders
+    const buyOrders = orderList.filter(o => o.side?.toUpperCase() === 'BUY')
+    if (buyOrders.length > ordersToKeep) {
+      // Sort BUY orders by price descending (highest first), keep first N, cancel the tail
+      const sortedBuy = [...buyOrders].sort((a, b) => {
+        const priceA = parseFloat(String(a.price || 0))
+        const priceB = parseFloat(String(b.price || 0))
+        return priceB - priceA
+      })
+      const tailBuy = sortedBuy.slice(ordersToKeep)
+      const buyOrderIds = tailBuy.map(o => o.orderId).filter((id): id is string => !!id)
+      allOrderIds.push(...buyOrderIds)
+    }
+
+    // Process SELL orders
+    const sellOrders = orderList.filter(o => o.side?.toUpperCase() === 'SELL')
+    if (sellOrders.length > ordersToKeep) {
+      // Sort SELL orders by price ascending (lowest first), keep first N, cancel the tail
+      const sortedSell = [...sellOrders].sort((a, b) => {
+        const priceA = parseFloat(String(a.price || 0))
+        const priceB = parseFloat(String(b.price || 0))
+        return priceA - priceB
+      })
+      const tailSell = sortedSell.slice(ordersToKeep)
+      const sellOrderIds = tailSell.map(o => o.orderId).filter((id): id is string => !!id)
+      allOrderIds.push(...sellOrderIds)
+    }
+
+    if (allOrderIds.length > 0) {
+      try {
+        await cancelOrdersMutation.mutateAsync({ symbol: pair.symbol, orderIds: allOrderIds })
+      } catch (error) {
+        console.error('Error cutting tails:', error)
+      }
+    }
+  }
+
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 p-5">
       <div className="max-w-7xl mx-auto">
         <header className="flex justify-between items-center mb-8 bg-white rounded-xl p-6 shadow-lg">
           <h1 className="text-3xl font-bold text-gray-800">XT API Orders Dashboard</h1>
           <div className="flex items-center gap-4">
+            <Link 
+              href="/bot"
+              className="bg-green-600 hover:bg-green-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors"
+            >
+              Trading Bot
+            </Link>
             <Link 
               href="/histogram"
               className="bg-purple-600 hover:bg-purple-700 text-white px-5 py-2.5 rounded-lg font-medium transition-colors"
@@ -187,175 +238,88 @@ const Home: NextPage = () => {
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
-          {PAIRS.map((pair) => {
-            const orderList = orders[pair.symbol] || []
-            const liquidity = calculateLiquidity(orderList)
-            const [base, quote] = pair.display.split('/')
-
-            return (
-              <OrderCard
-                key={pair.symbol}
-                pair={pair}
-                orderList={orderList}
-                liquidity={liquidity}
-                base={base}
-                quote={quote}
-                balances={balances}
-                onCancelOrders={cancelOrdersMutation.mutateAsync}
-              />
-            )
-          })}
-        </div>
-
-      </div>
-    </div>
-  )
-}
-
-interface OrderCardProps {
-  pair: Pair
-  orderList: Order[]
-  liquidity: { buy: { count: number; liquidity: number }; sell: { count: number; liquidity: number } }
-  base: string
-  quote: string
-  balances: BalanceData
-  onCancelOrders: (params: { symbol: string; orderIds: string[] }) => Promise<any>
-}
-
-const OrderCard: React.FC<OrderCardProps> = ({ pair, orderList, liquidity, base, quote, balances, onCancelOrders }) => {
-  const [selectedSide, setSelectedSide] = useState<'BUY' | 'SELL'>('BUY')
-  const [orderCount, setOrderCount] = useState(1)
-
-  const handleCancelOrders = async () => {
-    if (!orderList || orderList.length === 0) return
-
-    // Filter orders by selected side
-    const filteredOrders = orderList.filter(o => o.side?.toUpperCase() === selectedSide)
-    
-    if (filteredOrders.length === 0) {
-      return
-    }
-
-    // Sort orders: for BUY orders, sort by price descending (highest first), then take tail
-    // For SELL orders, sort by price ascending (lowest first), then take tail
-    const sortedOrders = [...filteredOrders].sort((a, b) => {
-      const priceA = parseFloat(String(a.price || 0))
-      const priceB = parseFloat(String(b.price || 0))
-      if (selectedSide === 'BUY') {
-        return priceB - priceA // Descending for BUY
-      } else {
-        return priceA - priceB // Ascending for SELL
-      }
-    })
-
-    // Take orders from the tail (last N orders)
-    const ordersToCancel = sortedOrders.slice(-Math.min(orderCount, sortedOrders.length))
-    const orderIds = ordersToCancel.map(o => o.orderId).filter((id): id is string => !!id)
-
-    if (orderIds.length === 0) {
-      return
-    }
-
-    try {
-      await onCancelOrders({ symbol: pair.symbol, orderIds })
-      setOrderCount(1)
-    } catch (error) {
-      console.error('Error cancelling orders:', error)
-    }
-  }
-
-  const maxOrdersForSide = orderList.filter(o => o.side?.toUpperCase() === selectedSide).length
-
-  // Calculate percentages of total balance
-  const quoteBalance = balances[quote]?.total || 0
-  const baseBalance = balances[base]?.total || 0
-  const buyPercentage = quoteBalance > 0 ? (liquidity.buy.liquidity / quoteBalance) * 100 : 0
-  const sellPercentage = baseBalance > 0 ? (liquidity.sell.liquidity / baseBalance) * 100 : 0
-
-  return (
-    <div className="bg-white rounded-xl p-6 shadow-lg hover:shadow-xl transition-shadow">
-      <h2 className="text-xl font-bold text-gray-800 mb-4 pb-3 border-b border-gray-100">
-        {pair.display}
-        <span className="ml-2 text-sm font-normal text-gray-500">({orderList.length} orders)</span>
-      </h2>
-      <div className="grid grid-cols-2 gap-4 mb-6">
-        <div className="bg-green-50 rounded-lg p-4 border border-green-200">
-          <div className="text-xs text-gray-600 mb-1">BUY Side</div>
-          <div className="text-lg font-bold text-green-700 mb-2">{liquidity.buy.count} orders</div>
-          <div className="text-xs text-gray-500">Liquidity:</div>
-          <div className="text-sm font-semibold text-gray-800">
-            {liquidity.buy.liquidity.toFixed(8)} {quote}
-            {buyPercentage > 0 && (
-              <span className="ml-2 text-xs text-gray-500">({buyPercentage.toFixed(1)}%)</span>
-            )}
-          </div>
-        </div>
-        <div className="bg-red-50 rounded-lg p-4 border border-red-200">
-          <div className="text-xs text-gray-600 mb-1">SELL Side</div>
-          <div className="text-lg font-bold text-red-700 mb-2">{liquidity.sell.count} orders</div>
-          <div className="text-xs text-gray-500">Liquidity:</div>
-          <div className="text-sm font-semibold text-gray-800">
-            {liquidity.sell.liquidity.toFixed(8)} {base}
-            {sellPercentage > 0 && (
-              <span className="ml-2 text-xs text-gray-500">({sellPercentage.toFixed(1)}%)</span>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {orderList.length > 0 && (
-        <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
-          <div className="flex gap-2 items-end">
-            <div className="flex-1">
-              <label className="block text-xs text-gray-600 mb-1">Side</label>
-              <div className="flex gap-1">
-                <button
-                  onClick={() => setSelectedSide('BUY')}
-                  className={`flex-1 py-1.5 px-2 rounded text-xs font-medium transition-colors ${
-                    selectedSide === 'BUY'
-                      ? 'bg-green-600 text-white'
-                      : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
-                  }`}
-                >
-                  BUY
-                </button>
-                <button
-                  onClick={() => setSelectedSide('SELL')}
-                  className={`flex-1 py-1.5 px-2 rounded text-xs font-medium transition-colors ${
-                    selectedSide === 'SELL'
-                      ? 'bg-red-600 text-white'
-                      : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
-                  }`}
-                >
-                  SELL
-                </button>
-              </div>
-            </div>
-            <div className="flex-1">
-              <label className="block text-xs text-gray-600 mb-1">Count (max: {maxOrdersForSide})</label>
+        <div className="bg-white rounded-xl p-4 shadow-lg">
+          <div className="flex items-center justify-between mb-3 pb-2 border-b border-gray-200">
+            <h2 className="text-xl font-bold text-gray-800">
+              Trading Pairs Overview
+            </h2>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-600 whitespace-nowrap">Keep per side:</label>
               <input
                 type="number"
-                min="1"
-                max={maxOrdersForSide}
-                value={orderCount}
-                onChange={(e) => setOrderCount(Math.max(1, Math.min(maxOrdersForSide, parseInt(e.target.value) || 1)))}
-                className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                min="0"
+                value={ordersToKeep}
+                onChange={(e) => setOrdersToKeep(Math.max(0, parseInt(e.target.value) || 0))}
+                className="w-20 px-2 py-1 border border-gray-300 rounded text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
-            <button
-              onClick={handleCancelOrders}
-              disabled={maxOrdersForSide === 0 || orderCount < 1}
-              className="py-1.5 px-3 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-xs font-medium transition-colors whitespace-nowrap"
-            >
-              Close
-            </button>
+          </div>
+          <div className="space-y-2">
+            {PAIRS.map((pair) => {
+              const orderList = orders[pair.symbol] || []
+              const liquidity = calculateLiquidity(orderList)
+              const [base, quote] = pair.display.split('/')
+              const quoteBalance = balances[quote]?.total || 0
+              const baseBalance = balances[base]?.total || 0
+              const buyPercentage = quoteBalance > 0 ? (liquidity.buy.liquidity / quoteBalance) * 100 : 0
+              const sellPercentage = baseBalance > 0 ? (liquidity.sell.liquidity / baseBalance) * 100 : 0
+              
+              const buyOrders = orderList.filter(o => o.side?.toUpperCase() === 'BUY')
+              const sellOrders = orderList.filter(o => o.side?.toUpperCase() === 'SELL')
+              const hasTailToCut = buyOrders.length > ordersToKeep || sellOrders.length > ordersToKeep
+
+              return (
+                <div key={pair.symbol} className="bg-gray-50 rounded-lg p-2.5 border border-gray-200">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex-shrink-0 w-32">
+                      <h3 className="text-sm font-bold text-gray-800">
+                        {pair.display}
+                        <span className="ml-1.5 text-xs font-normal text-gray-500">({orderList.length})</span>
+                      </h3>
+                    </div>
+                    <div className="flex-1 grid grid-cols-2 gap-2">
+                      <div className="bg-green-50 rounded p-2 border border-green-200">
+                        <div className="text-xs text-gray-600 mb-0.5">BUY</div>
+                        <div className="text-sm font-bold text-green-700 mb-0.5">{liquidity.buy.count}</div>
+                        <div className="text-xs font-semibold text-gray-800">
+                          {liquidity.buy.liquidity.toFixed(8)} {quote}
+                          {buyPercentage > 0 && (
+                            <span className="ml-1 text-xs text-gray-500">({buyPercentage.toFixed(1)}%)</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="bg-red-50 rounded p-2 border border-red-200">
+                        <div className="text-xs text-gray-600 mb-0.5">SELL</div>
+                        <div className="text-sm font-bold text-red-700 mb-0.5">{liquidity.sell.count}</div>
+                        <div className="text-xs font-semibold text-gray-800">
+                          {liquidity.sell.liquidity.toFixed(8)} {base}
+                          {sellPercentage > 0 && (
+                            <span className="ml-1 text-xs text-gray-500">({sellPercentage.toFixed(1)}%)</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex-shrink-0">
+                      <button
+                        onClick={() => cutTails(pair)}
+                        disabled={!hasTailToCut || cancelOrdersMutation.isPending}
+                        className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-xs font-medium transition-colors whitespace-nowrap"
+                      >
+                        {cancelOrdersMutation.isPending ? 'Cutting...' : 'Cut Tails'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
           </div>
         </div>
-      )}
+
+      </div>
     </div>
   )
 }
+
 
 export default Home
 
